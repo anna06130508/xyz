@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>实时语音通话</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f2f5;
+        }
+        .container {
+            text-align: center;
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            width: 90%;
+            max-width: 400px;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+        #status {
+            margin: 20px 0;
+            font-size: 1.1em;
+            color: #555;
+            min-height: 50px; /* 增加高度防止跳动 */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .controls, .call-active-controls {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        input[type="text"] {
+            padding: 12px;
+            font-size: 1em;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }
+        button {
+            padding: 15px 20px;
+            font-size: 1.2em;
+            cursor: pointer;
+            border: none;
+            border-radius: 8px;
+            color: white;
+            transition: background-color 0.3s, transform 0.1s;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        #connectButton { background-color: #28a745; }
+        #connectButton:hover { background-color: #218838; }
+        
+        #talkButton { background-color: #007bff; }
+        #talkButton:hover { background-color: #0056b3; }
+        #talkButton:active { /* 按下时的效果 */
+            transform: scale(0.95);
+            background-color: #0056b3;
+        }
+
+        #disconnectButton { background-color: #dc3545; }
+        #disconnectButton:hover { background-color: #c82333; }
+
+        .note {
+            margin-top: 20px;
+            font-size: 0.9em;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>实时语音通话</h1>
+    
+    <div id="status">请输入服务器地址，然后点击“拨打电话”</div>
+
+    <!-- 连接前的控件 -->
+    <div id="pre-call-controls" class="controls">
+        <input type="text" id="wsUrl" value="ws://127.0.0.1:8001/ws">
+        <button id="connectButton">📞 拨打电话</button>
+    </div>
+
+    <!-- 连接后的控件，默认隐藏 -->
+    <div id="call-active-controls" class="call-active-controls" style="display: none;">
+        <button id="talkButton">🎤 按住说话</button>
+        <button id="disconnectButton">☎️ 挂断电话</button>
+    </div>
+
+    <div class="note">
+        <strong>提示:</strong> 请使用耳机以获得最佳体验。
+    </div>
+</div>
+
+<script>
+    // --- DOM 元素引用 ---
+    const wsUrlInput = document.getElementById('wsUrl');
+    const statusDiv = document.getElementById('status');
+    const connectButton = document.getElementById('connectButton');
+    const talkButton = document.getElementById('talkButton');
+    const disconnectButton = document.getElementById('disconnectButton');
+    const preCallControls = document.getElementById('pre-call-controls');
+    const callActiveControls = document.getElementById('call-active-controls');
+
+    // --- 状态变量 ---
+    let websocket;
+    let mediaRecorder;
+    let audioContext;
+    let userStream;
+    let isCallActive = false;
+
+    // --- 事件监听 ---
+    connectButton.addEventListener('click', startCall);
+    disconnectButton.addEventListener('click', endCall);
+
+    // "按住说话" 的核心逻辑
+    talkButton.addEventListener('mousedown', startSpeaking);
+    talkButton.addEventListener('mouseup', stopSpeaking);
+    // 触摸屏设备支持
+    talkButton.addEventListener('touchstart', (e) => { e.preventDefault(); startSpeaking(); });
+    talkButton.addEventListener('touchend', (e) => { e.preventDefault(); stopSpeaking(); });
+
+
+    // --- 功能函数 ---
+
+    async function startCall() {
+        if (isCallActive) return;
+        connectButton.disabled = true;
+
+        // 1. 获取麦克风权限
+        try {
+            statusDiv.textContent = '正在请求麦克风权限...';
+            userStream = await navigator.mediaDevices.getUserMedia({
+                audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+            });
+            statusDiv.textContent = '麦克风准备就绪。';
+        } catch (err) {
+            statusDiv.textContent = '❌ 无法获取麦克风权限。';
+            connectButton.disabled = false;
+            return;
+        }
+
+        // 2. 初始化 WebSocket 连接
+        statusDiv.textContent = '📞 正在拨号...';
+        websocket = new WebSocket(wsUrlInput.value);
+        websocket.binaryType = 'arraybuffer';
+
+        websocket.onopen = () => {
+            isCallActive = true;
+            statusDiv.textContent = '✅ 连接成功！请按住按钮说话。';
+            // 切换UI界面
+            preCallControls.style.display = 'none';
+            callActiveControls.style.display = 'flex';
+        };
+
+        websocket.onmessage = (event) => {
+            if (event.data instanceof ArrayBuffer) {
+                statusDiv.textContent = '🎶 正在播放AI的回应...';
+                playAudio(event.data).finally(() => {
+                    // 播放完毕后，恢复提示
+                    if(isCallActive) statusDiv.textContent = '✅ 通话中，请按住按钮说话。';
+                });
+            }
+        };
+
+        websocket.onclose = () => {
+            statusDiv.textContent = '🔌 连接已断开。';
+            endCall(false); // 更新UI状态，但不再尝试关闭ws
+        };
+
+        websocket.onerror = (error) => {
+            statusDiv.textContent = '❌ WebSocket 连接错误。';
+            console.error('WebSocket Error:', error);
+            connectButton.disabled = false;
+        };
+    }
+
+    function startSpeaking() {
+        if (!isCallActive || !userStream) return;
+        
+        statusDiv.textContent = '🎙️ 正在聆听...';
+        
+        mediaRecorder = new MediaRecorder(userStream, { mimeType: 'audio/webm;codecs=opus' });
+        
+        mediaRecorder.ondataavailable = (event) => {
+            if (event.data.size > 0 && websocket && websocket.readyState === WebSocket.OPEN) {
+                websocket.send(event.data);
+            }
+        };
+        
+        mediaRecorder.start(250); // 每 250ms 发送一次数据块
+    }
+
+    function stopSpeaking() {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+            mediaRecorder.stop();
+            // 【关键】发送结束标记
+            // 告诉服务器，我说完了，该你处理了
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                websocket.send("END_OF_STREAM");
+            }
+            statusDiv.textContent = '🤫 等待AI回应...';
+        }
+    }
+
+    function endCall(closeWs = true) {
+        if (!isCallActive) return;
+
+        isCallActive = false;
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+            mediaRecorder.stop();
+        }
+        if (userStream) {
+            userStream.getTracks().forEach(track => track.stop());
+        }
+        if (websocket && closeWs) {
+            websocket.close();
+        }
+        
+        // 恢复UI到初始状态
+        preCallControls.style.display = 'flex';
+        callActiveControls.style.display = 'none';
+        connectButton.disabled = false;
+        statusDiv.textContent = '通话已结束。';
+    }
+
+    async function playAudio(arrayBuffer) {
+        if (!audioContext) {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        try {
+            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+            source.start(0);
+        } catch (e) {
+            console.error('解码或播放音频时出错:', e);
+            statusDiv.textContent = '❌ 无法播放收到的音频。';
+        }
+    }
+</script>
+
+</body>
+</html>
